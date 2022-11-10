@@ -14,9 +14,12 @@
 # along with Jeedom. If not, see <http://www.gnu.org/licenses/>.
 
 from binascii import b2a_base64
+from datetime import datetime
+import json
 import logging
 import queue
 import sys
+import time
 import threading
 from os import unlink
 from tempfile import NamedTemporaryFile
@@ -30,20 +33,22 @@ except ImportError:
 	print("Error: importing module paho.mqtt")
 	sys.exit(1)
 
+from jMqttRealTime import *
 
 class jMqttClient:
 	def __init__(self, jcom, message):
-		self._log       = logging.getLogger('Client')
+		self._log            = logging.getLogger('Client')
 #		self._log.debug('jMqttClient.init(): message=%r', message)
-		self.jcom       = jcom
-		self.message    = message
-		self.mqttclient = None
+		self.jcom            = jcom
+		self.message         = message
+		self.realtime        = None
+		self.mqttclient      = None
 
 	def on_connect(self, client, userdata, flags, rc):
 		self.connected = True
-		if self.mqttstatustopic != '':
-			client.will_set(self.mqttstatustopic, 'offline', 1, True)
-			client.publish(self.mqttstatustopic, 'online', 1, True)
+		if self.mqttlwt:
+			client.will_set(self.mqttlwt_topic, self.mqttlwt_offline, 1, True)
+			client.publish(self.mqttlwt_topic, self.mqttlwt_online, 1, True)
 		self._log.info('Connected to broker %s:%d', self.mqtthostname, self.mqttport)
 		with self.mqttsub_lock:
 			for topic in self.mqttsubscribedtopics:
@@ -71,7 +76,24 @@ class jMqttClient:
 				usablePayload = b2a_base64(message.payload, newline=False).decode('utf-8')
 				form = ' (bin in base64)'
 		self._log.info('Message received (topic="%s", payload="%s"%s, QoS=%s, retain=%s)', message.topic, usablePayload, form, message.qos, bool(message.retain))
-		self.jcom.send_async({"cmd":"messageIn","id":self.id,"topic":message.topic,"payload":usablePayload,"qos":message.qos,"retain":bool(message.retain)})
+		self.jcom.send_async({'cmd':'messageIn', 'id':self.id, 'topic':message.topic, 'payload':usablePayload, 'qos':message.qos, 'retain':bool(message.retain)})
+
+	def realtime_start(self, filename, subscribe=[], exclude=[], retained=False, duration=180):
+		if self.realtime is not None and self.realtime.connected:
+			self.realtime.stop()
+		self.realtime = jMqttRealTime(self.jcom, self.message, filename, subscribe, exclude, retained, duration)
+		self.realtime.start()
+
+	def realtime_stop(self):
+		if self.realtime is not None and self.realtime.connected:
+			self.realtime.stop()
+
+	def realtime_clear(self, file):
+		if self.realtime is not None:
+			self.realtime.clear()
+		with open(file, 'w') as f:
+			json.dump([], f)
+		self._log.info('Real Time Cleared')
 
 	def subscribe_topic(self, topic, qos, lock=True):
 		try:
@@ -122,10 +144,24 @@ class jMqttClient:
 		self.id = self.message['id']
 		self._log = logging.getLogger('Client'+self.id)
 		self.mqtthostname = self.message['hostname']
+		if 'proto' not in self.message:
+			self.message['proto'] = 'mqtt'
+		if 'port' not in self.message:
+			self.message['port'] = ''
+		if self.message['port'] == '':
+			self.mqttport = {'mqtt': 1883, 'mqtts': 8883, 'ws': 1884, 'wss': 8884}.get(self.message['proto'], 1883)
 		self.mqttport = self.message['port'] if 'port' in self.message else 1883
-		self.mqttstatustopic = self.message['statustopic'] if 'statustopic' in self.message else ''
-		if 'clientid' not in self.message:
-			self.message['clientid'] = ''
+		self.mqttlwt = self.message['lwt']
+		self.mqttlwt_topic = self.message['lwtTopic']
+		self.mqttlwt_online = self.message['lwtOnline']
+		self.mqttlwt_offline = self.message['lwtOffline']
+		if 'mqttId' not in self.message:
+			self.message['mqttId'] = False
+		if self.message['mqttId']:
+			if 'mqttIdValue' not in self.message or self.message['mqttIdValue'] == '':
+				self.message['mqttIdValue'] = 'jeedom'
+		else:
+			self.message['mqttIdValue'] = ''
 		if 'username' not in self.message:
 			self.message['username'] = ''
 		if 'password' not in self.message:
@@ -136,7 +172,13 @@ class jMqttClient:
 #		self._log.debug('jMqttClient.init() SELF dump: %r', [(attr, getattr(self, attr)) for attr in vars(self) if not callable(getattr(self, attr)) and not attr.startswith("__")])
 
 		# Create MQTT Client
-		self.mqttclient = mqtt.Client(self.message['clientid'])
+		if self.message['proto'].startswith('ws'):
+			self.mqttclient = mqtt.Client(client_id=self.message['mqttIdValue'], transport="websockets")
+			if 'mqttWsUrl' in self.message and self.message['mqttWsUrl'] != '':
+				self.message['mqttWsUrl'] = (self.message['mqttWsUrl'] if (self.message['mqttWsUrl'][0] == '/') else '/' + self.message['mqttWsUrl'])
+				self.mqttclient.ws_set_options(self.message['mqttWsUrl'])
+		else:
+			self.mqttclient = mqtt.Client(client_id=self.message['mqttIdValue'])
 		# Enable Paho logging functions
 		if self._log.isEnabledFor(logging.VERBOSE):
 			self.mqttclient.enable_logger(self._log)
@@ -147,22 +189,41 @@ class jMqttClient:
 				self.mqttclient.username_pw_set(self.message['username'], self.message['password'])
 			else:
 				self.mqttclient.username_pw_set(self.message['username'])
-		if self.message['proto'] == 'mqtts':
+		if self.message['proto'] == 'mqtts' or self.message['proto'] == 'wss':
 			try:
-				ca = NamedTemporaryFile(delete=False)
-				ca.write(str.encode(self.message['tlsca']))
-				ca.close()
-				cert = NamedTemporaryFile(delete=False)
-				cert.write(str.encode(self.message['tlsclicert']))
-				cert.close()
-				key = NamedTemporaryFile(delete=False)
-				key.write(str.encode(self.message['tlsclikey']))
-				key.close()
-				self.mqttclient.tls_set(ca_certs=ca.name, certfile=cert.name, keyfile=key.name)
-				self.mqttclient.tls_insecure_set(('tlsinsecure' in self.message) and self.message['tlsinsecure'])
-				unlink(ca.name)
-				unlink(cert.name)
-				unlink(key.name)
+				# Get authority type
+				tlscheck = 'public' if ('tlscheck' not in self.message) else self.message['tlscheck']
+				insecure = tlscheck == 'disabled'
+				reqs = mqtt.ssl.CERT_NONE if insecure else mqtt.ssl.CERT_REQUIRED
+				# Get CA cert if needed
+				certs = None
+				if tlscheck == 'private' and 'tlsca' in self.message:
+					fca = NamedTemporaryFile(delete=False)
+					fca.write(str.encode(self.message['tlsca']))
+					fca.close()
+					certs = fca.name
+				# Get Private Cert / Key if needed
+				cert = None
+				key = None
+				if {'tlscli', 'tlsclicert', 'tlsclikey'} <= self.message.keys() and self.message['tlscli']:
+					fcert = NamedTemporaryFile(delete=False)
+					fcert.write(str.encode(self.message['tlsclicert']))
+					fcert.close()
+					cert = fcert.name
+					fkey = NamedTemporaryFile(delete=False)
+					fkey.write(str.encode(self.message['tlsclikey']))
+					fkey.close()
+					key = fkey.name
+				# Setup TLS
+				self.mqttclient.tls_set(ca_certs=certs, cert_reqs=reqs, certfile=cert, keyfile=key)
+				self.mqttclient.tls_insecure_set(insecure)
+				# Remove temporary files
+				if certs is not None:
+					unlink(fca.name)
+				if cert is not None:
+					unlink(fcert.name)
+				if key is not None:
+					unlink(fkey.name)
 			except:
 				self._log.exception('Fatal TLS Certificate import Exception, this connection will most likely fail!')
 
@@ -183,8 +244,8 @@ class jMqttClient:
 
 	def stop(self):
 		if self.mqttclient is not None:
-			if self.mqttstatustopic != '':
-				self.mqttclient.publish(self.mqttstatustopic, 'offline', 1, True)
+			if self.mqttlwt:
+				self.mqttclient.publish(self.mqttlwt_topic, self.mqttlwt_offline, 1, True)
 			self.mqttclient.disconnect()
 			self.mqttclient.loop_stop()
 			self.mqttclient = None

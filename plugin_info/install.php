@@ -130,13 +130,19 @@ function cleanLeakedInfoInEqpts() {
 							'mqttUser',
 							'mqttPass',
 							'mqttPubStatus',
+							'mqttLwt',
+							'mqttLwtTopic',
+							'mqttLwtOnline',
+							'mqttLwtOffline',
 							'mqttIncTopic',
 							'mqttTls',
 							'mqttTlsCheck',
 							'mqttTlsCaFile',
+							'mqttTlsClient',
 							'mqttTlsClientCertFile',
 							'mqttTlsClientKeyFile',
-							'api',
+							'mqttApi',
+							'mqttApiTopic',
 							'mqttPahoLog',
 							'loglevel');
 
@@ -165,13 +171,19 @@ function cleanLeakedInfoInTemplates() {
 							'mqttUser',
 							'mqttPass',
 							'mqttPubStatus',
+							'mqttLwt',
+							'mqttLwtTopic',
+							'mqttLwtOnline',
+							'mqttLwtOffline',
 							'mqttIncTopic',
 							'mqttTls',
 							'mqttTlsCheck',
 							'mqttTlsCaFile',
+							'mqttTlsClient',
 							'mqttTlsClientCertFile',
 							'mqttTlsClientKeyFile',
-							'api',
+							'mqttApi',
+							'mqttApiTopic',
 							'mqttPahoLog',
 							'loglevel');
 	$templateFolderPath = __DIR__ . '/../data/template';
@@ -290,6 +302,96 @@ function moveCertsInDb() {
 	jMQTT::logger('info', __("Certificats déplacés dans la base de donnée", __FILE__));
 }
 
+function v12_modifyConfKeysInBrk() {
+	// for each Broker
+	foreach ((jMQTT::getBrokers()) as $broker) {
+		try {
+			// Set 'mqttLwt' config only if not already set
+			if ($broker->getConfiguration(jMQTT::CONF_KEY_MQTT_LWT, 'NotThere') == 'NotThere') {
+				// copy 'mqttPubStatus' value to 'mqttLwt' in broker config
+				$broker->setConfiguration(jMQTT::CONF_KEY_MQTT_LWT, $broker->getConfiguration('mqttPubStatus', '0'));
+			}
+			// delete 'mqttPubStatus' from broker config
+			$broker->setConfiguration('mqttPubStatus', null);
+
+			// Set 'mqttApi' config only if not already set
+			if ($broker->getConfiguration(jMQTT::CONF_KEY_MQTT_API, 'NotThere') == 'NotThere') {
+				// copy 'api' value to 'mqttApi' in broker config
+				$broker->setConfiguration(jMQTT::CONF_KEY_MQTT_API, ($broker->getConfiguration('api', '0') == 'enable') ? '1' : '0');
+			}
+			// delete 'api' from broker config
+			$broker->setConfiguration('api', null);
+
+			// remove old include_mode cache key
+			$broker->setCache('include_mode', null);
+
+			$broker->save();
+		} catch (Throwable $e) {
+			if (log::getLogLevel(jMQTT::class) > 100)
+				jMQTT::logger('error', sprintf(__("%1\$s() a levé l'Exception: %2\$s", __FILE__), __FUNCTION__, $e->getMessage()));
+			else
+				jMQTT::logger('error', str_replace("\n",' </br> ', sprintf(__("%1\$s() a levé l'Exception: %2\$s", __FILE__).
+							"</br>@Stack: %3\$s,</br>@BrokerId: %4\$s.",
+							__FUNCTION__, $e->getMessage(), $e->getTraceAsString(), $broker->getId())));
+		}
+	}
+}
+
+function v12_modifyBrkIdConfKeyInEq() {
+	foreach (jMQTT::byType(jMQTT::class) as $eqLogic) {
+		try {
+			if ($eqLogic->getType() == jMQTT::TYP_BRK) {
+				jMQTT::logger('debug', $eqLogic->getHumanName() . ' est un Broker');
+				continue;
+			}
+			// Set 'eqLogic' config only if not already set
+			if ($eqLogic->getConfiguration(jMQTT::CONF_KEY_BRK_ID, 'NotThere') == 'NotThere') {
+				// copy 'brkId' value to 'eqLogic' in broker config
+				$eqLogic->setConfiguration(jMQTT::CONF_KEY_BRK_ID, $eqLogic->getConfiguration('brkId', -1));
+				// delete 'brkId' from broker config
+				$eqLogic->setConfiguration('brkId', null);
+				$eqLogic->save(true); // Direct save to avoid issues while saving
+			}
+		} catch (Throwable $e) {
+			if (log::getLogLevel(jMQTT::class) > 100)
+				jMQTT::logger('error', sprintf(__("%1\$s() a levé l'Exception: %2\$s", __FILE__), __FUNCTION__, $e->getMessage()));
+			else
+				jMQTT::logger('error', str_replace("\n",' </br> ', sprintf(__("%1\$s() a levé l'Exception: %2\$s", __FILE__).
+							"</br>@Stack: %3\$s,</br>@EqlogicId: %4\$s.",
+							__FUNCTION__, $e->getMessage(), $e->getTraceAsString(), $eqLogic->getId())));
+		}
+	}
+	jMQTT::logger('info', __("Clés de configuration des Brokers jMQTT modifiées", __FILE__));
+}
+
+function v13_modifyClientIdInBrk() {
+	// for each Broker
+	foreach ((jMQTT::getBrokers()) as $broker) {
+		try {
+			// Set 'mqttId' & 'mqttIdValue' config, only if 'mqttIdValue' config not already set
+			if ($broker->getConfiguration('mqttIdValue', 'NotThere') == 'NotThere') {
+				$mqttIdValue = $broker->getConfiguration('mqttId', '');
+				// Copy 'mqttId' into 'mqttIdValue'
+				$broker->setConfiguration('mqttIdValue', $mqttIdValue);
+
+				// Set 'mqttId' to '1' if 'mqttIdValue' is set, '0' otherwise
+				$broker->setConfiguration('mqttId', ''.intval($mqttIdValue != ''));
+
+				// Save eqBroker if modified
+				$broker->save();
+			}
+		} catch (Throwable $e) {
+			if (log::getLogLevel(jMQTT::class) > 100)
+				jMQTT::logger('error', sprintf(__("%1\$s() a levé l'Exception: %2\$s", __FILE__), __FUNCTION__, $e->getMessage()));
+			else
+				jMQTT::logger('error', str_replace("\n",' </br> ', sprintf(__("%1\$s() a levé l'Exception: %2\$s", __FILE__).
+							"</br>@Stack: %3\$s,</br>@BrokerId: %4\$s.",
+							__FUNCTION__, $e->getMessage(), $e->getTraceAsString(), $broker->getId())));
+		}
+	}
+	jMQTT::logger('info', __("Configuration des Client-Id mises à jour", __FILE__));
+}
+
 function jMQTT_install() {
 	jMQTT::logger('debug', 'install.php: jMQTT_install()');
 	jMQTT_update(false);
@@ -363,19 +465,34 @@ function jMQTT_update($_direct=true) {
 			raiseForceDepInstallFlag();
 			config::save(VERSION, 9, 'jMQTT');
 		}
+
 		// VERSION = 10
 		if ($versionFromDB < 10) {
 			convertBatteryStatus();
 			config::save(VERSION, 10, 'jMQTT');
 		}
+
 		// VERSION = 11
 		if ($versionFromDB < 11) {
 			moveCertsInDb();
 			config::save(VERSION, 11, 'jMQTT');
 		}
+
+		// VERSION = 12
+		if ($versionFromDB < 12) {
+			v12_modifyConfKeysInBrk();
+			v12_modifyBrkIdConfKeyInEq();
+			config::save(VERSION, 12, 'jMQTT');
+		}
+
+		// VERSION = 13
+		if ($versionFromDB < 13) {
+			v13_modifyClientIdInBrk();
+			config::save(VERSION, 13, 'jMQTT');
+		}
 	}
 	else
-		config::save(VERSION, 11, 'jMQTT');
+		config::save(VERSION, 13, 'jMQTT');
 }
 
 function jMQTT_remove() {

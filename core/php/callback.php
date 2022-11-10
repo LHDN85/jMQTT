@@ -54,7 +54,7 @@ foreach($messages as $message) {					// Iterate through the messages
 		case 'messageIn':
 			if (!isset($message['id']) || !isset($message['topic']) || !isset($message['payload']))
 				break;
-			jMQTT::fromDaemon_msgIn($message['id'], $message['topic'], $message['payload']);
+			jMQTT::fromDaemon_msgIn($message['id'], $message['topic'], $message['payload'], $message['qos'], $message['retain']);
 			continue 2;								// Next foreach iteration
 
 		case 'brokerUp':								// {"cmd":"brokerUp", "id":string}
@@ -67,6 +67,18 @@ foreach($messages as $message) {					// Iterate through the messages
 			if (!isset($message['id']))
 				break;
 			jMQTT::fromDaemon_brkDown($message['id']);
+			continue 2;								// Next foreach iteration
+
+		case 'realTimeStarted':						// {"cmd":"realTimeStart", "id":string}
+			if (!isset($message['id']))
+				break;
+			jMQTT::fromDaemon_realTimeStarted($message['id']);
+			continue 2;								// Next foreach iteration
+
+		case 'realTimeStopped':						// {"cmd":"realTimeStopped", "id":string, "nbMsgs":int}
+			if (!isset($message['id']) || !isset($message['nbMsgs']))
+				break;
+			jMQTT::fromDaemon_realTimeStopped($message['id'], $message['nbMsgs']);
 			continue 2;								// Next foreach iteration
 
 		case 'hb':									// {"cmd":"hb"}
@@ -86,9 +98,9 @@ foreach($messages as $message) {					// Iterate through the messages
 			continue 2;								// Next foreach iteration
 	}
 
-// TODO: Later
+// TODO (medium) Implemented for later
 /*
-		case 'value':								// {"cmd":"value", "c":[string], "v":string} #BrkId, cmdIds, value
+		case 'value':								// {"cmd":"value", "c":[string], "v":string} # c: list of cmdId v: value to set
 			if (!isset($message['c']) || !isset($message['v']))
 				break;
 			foreach($message['c'] as $cmdId)

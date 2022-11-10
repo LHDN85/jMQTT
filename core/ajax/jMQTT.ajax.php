@@ -102,63 +102,31 @@ try {
 		ajax::success();
 	}
 
-	// To change the equipment automatic inclusion mode
-	if (init('action') == 'changeIncludeMode') {
-		$new_broker = jMQTT::getBrokerFromId(init('id'));
-		$new_broker->changeIncludeMode(init('mode'));
+	// Enable/Disable Real Time mode on this Broker
+	if (init('action') == 'changeRealTimeMode') {
+		$broker = jMQTT::getBrokerFromId(init('id'));
+		$broker->changeRealTimeMode(init('mode'), init('subscribe'), init('exclude'), init('retained'));
 		ajax::success();
 	}
 
-	if (init('action') == 'getMqttClientInfo') {
-		if (!isConnect('admin')) {
-			throw new Exception(__('401 - Accès non autorisé', __FILE__));
-		}
-		$new_broker = jMQTT::getBrokerFromId(init('id'));
-		ajax::success($new_broker->getMqttClientInfo());
-	}
-
-	if (init('action') == 'getMqttClientState') {
-		if (!isConnect('admin')) {
-			throw new Exception(__('401 - Accès non autorisé', __FILE__));
-		}
-		$new_broker = jMQTT::getBrokerFromId(init('id'));
-		ajax::success($new_broker->getMqttClientState());
-	}
-
-	if (init('action') == 'startMqttClient') {
-		if (!isConnect('admin')) {
-			throw new Exception(__('401 - Accès non autorisé', __FILE__));
-		}
-		$new_broker = jMQTT::getBrokerFromId(init('id'));
-		ajax::success($new_broker->startMqttClient(true));
-	}
-
-	if (init('action') == 'moveToBroker') {
-		/** @var jMQTT $eqpt */
-		// TODO INVESTIGATE AND FIX BUG: Move cmd to other broker or Delete Broker -> jMQTT daemon failure
-
+	// Add a new command on an existing jMQTT equipment
+	if (init('action') == 'newCmd') {
 		$eqpt = jMQTT::byId(init('id'));
 		if (!is_object($eqpt) || $eqpt->getEqType_name() != jMQTT::class) {
 			throw new Exception(sprintf(__("Pas d'équipement jMQTT avec l'id %s", __FILE__), init('id')));
 		}
-		$new_broker = jMQTT::getBrokerFromId(init('brk_id'));
-		jMQTT::logger('info', sprintf(__("Déplacement de l'Equipement #%1\$s# du broker %2\$s vers le broker %3\$s", __FILE__), $eqpt->getHumanName(), $eqpt->getBroker()->getName(), $new_broker->getName()));
-		$eqpt->setBrkId($new_broker->getId());
-		$eqpt->cleanEquipment();
-		$eqpt->save();
-
-		ajax::success();
+		$new_cmd = jMQTTCmd::newCmd($eqpt, init('name'), init('topic'), init('jsonPath'));
+		$new_cmd->save();
+		ajax::success(array('id' => $new_cmd->getId(), 'human' => $new_cmd->getHumanName()));
 	}
 
-	if (init('action') == 'getBrokerList') {
-		$returns = array();
-		foreach (jMQTT::getBrokers() as $id => $brk)
-			$returns[$id] = $brk->getName();
-		ajax::success($returns);
+	if (init('action') == 'startMqttClient') {
+		$broker = jMQTT::getBrokerFromId(init('id'));
+		ajax::success($broker->startMqttClient(true));
 	}
 
 	if (init('action') == 'sendLoglevel') {
-		jMQTT::toDaemon_setLogLevel();
+		jMQTT::toDaemon_setLogLevel(init('level'));
 		ajax::success();
 	}
 
@@ -166,6 +134,58 @@ try {
 		config::save('urlOverrideEnable', init('valEn'), 'jMQTT');
 		config::save('urlOverrideValue', init('valUrl'), 'jMQTT');
 		ajax::success();
+	}
+
+	if (init('action') == 'realTimeGet') {
+		$broker = jMQTT::getBrokerFromId(init('id'));
+		$_file = jeedom::getTmpFolder('jMQTT').'/rt' . $broker->getId() . '.json';
+		if (!file_exists($_file))
+			ajax::success([]);
+		// Read content from file without error handeling!
+		$content = file_get_contents($_file);
+		// Decode template file content to json (or raise)
+		$json = json_decode($content, true);
+		// Get filtering data
+		$since = init('since', '');
+		// Search for compatible eqLogic on this Broker
+		$brk_elogics = jMQTT::byBrkId($broker->getId());
+		$res = [];
+		// Function to filter array on date
+		function since_filter($val) { global $since; return $val['date'] > $since; }
+		// Filter array and search for matching eqLogic on remainings
+		foreach (array_filter($json, 'since_filter') as $msg) {
+			$eqNames = '';
+			foreach ($brk_elogics as $eqpt) {
+				if (mosquitto_topic_matches_sub($eqpt->getTopic(), $msg['topic']))
+					$eqNames .= '<br />#'.$eqpt->getHumanName().'#';
+			}
+			$msg['existing'] = $eqNames;
+			$res[] = $msg;
+		}
+		// Return result
+		ajax::success($res);
+	}
+
+	if (init('action') == 'realTimeClear') {
+		$broker = jMQTT::getBrokerFromId(init('id'));
+		$broker->toDaemon_realTimeClear();
+		ajax::success();
+	}
+
+	if (init('action') == 'mosquittoInstall') {
+		jMQTT::mosquittoInstall();
+		ajax::success(jMQTT::mosquittoCheck());
+	}
+
+	if (init('action') == 'mosquittoRepare') {
+		jMQTT::mosquittoRepare();
+		ajax::success(jMQTT::mosquittoCheck());
+	}
+
+	if (init('action') == 'mosquittoRemove') {
+		sleep(3);
+		jMQTT::mosquittoRemove();
+		ajax::success(jMQTT::mosquittoCheck());
 	}
 
 	throw new Exception(__('Aucune méthode Ajax ne correspond à : ', __FILE__) . init('action'));
